@@ -1,0 +1,24 @@
+name: "Get OIDC JWT"
+description: "Provider-agnostic OIDC JWT fetcher compatible with GitHub Actions and Forgejo Actions"
+inputs:
+  audience:
+    description: "Target audience (aud) claim for the OIDC JWT"
+    required: true
+outputs:
+  jwt:
+    description: "Short-lived OIDC JWT"
+    value: ${{ steps.fetch.outputs.jwt }}
+runs:
+  using: "composite"
+  steps:
+    - id: fetch
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          echo "::error::OIDC token request env vars missing. Ensure 'permissions: id-token: write' is set."
+          exit 1
+        fi
+        JWT=$(curl -fsSL           -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"           "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ inputs.audience }}"           | jq -r '.value')
+        echo "::add-mask::${JWT}"
+        echo "jwt=${JWT}" >> "$GITHUB_OUTPUT"

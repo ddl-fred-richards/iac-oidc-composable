@@ -1,0 +1,83 @@
+name: Composable OIDC Pipeline
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  oidc-showcase:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1. AWS STS (Web Identity)
+      - id: aws_jwt
+        uses: ./.github/actions/get-oidc-jwt
+        with:
+          audience: "sts.amazonaws.com"
+      - name: Auth AWS
+        if: vars.AWS_ROLE_ARN != ''
+        run: |
+          CREDS=$(aws sts assume-role-with-web-identity             --role-arn "${{ vars.AWS_ROLE_ARN }}"             --role-session-name "ci-${GITHUB_RUN_ID}"             --web-identity-token "${{ steps.aws_jwt.outputs.jwt }}"             --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)
+          read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< "$CREDS"
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          aws sts get-caller-identity
+
+      # 2. Azure Entra ID (Federated Identity Credential)
+      - id: azure_jwt
+        uses: ./.github/actions/get-oidc-jwt
+        with:
+          audience: "api://AzureADTokenExchange"
+      - name: Auth Azure
+        if: vars.AZURE_CLIENT_ID != ''
+        run: |
+          az login --service-principal             --tenant "${{ vars.AZURE_TENANT_ID }}"             --username "${{ vars.AZURE_CLIENT_ID }}"             --federated-token "${{ steps.azure_jwt.outputs.jwt }}"
+
+      # 3. Zot Registry (Native OIDC Bearer)
+      - id: zot_jwt
+        uses: ./.github/actions/get-oidc-jwt
+        with:
+          audience: "https://zot.internal.example.com"
+      - name: Auth Zot Registry
+        if: vars.ZOT_REGISTRY_HOST != ''
+        run: |
+          echo "${{ steps.zot_jwt.outputs.jwt }}" |             oras login "${{ vars.ZOT_REGISTRY_HOST }}" --username "" --password-stdin
+
+      # 4. JFrog Artifactory (Native OIDC Token Exchange)
+      - id: jfrog_jwt
+        uses: ./.github/actions/get-oidc-jwt
+        with:
+          audience: "https://jfrog.internal.example.com"
+      - name: Exchange for JFrog Access Token
+        if: vars.JFROG_URL != ''
+        run: |
+          JFROG_TOKEN=$(curl -fsSL -X POST "${{ vars.JFROG_URL }}/access/api/v1/oidc/token"             -H "Content-Type: application/json"             -d "{
+              "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+              "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+              "subject_token": "${{ steps.jfrog_jwt.outputs.jwt }}",
+              "provider_name": "${{ vars.JFROG_OIDC_PROVIDER }}"
+            }" | jq -r '.access_token')
+          echo "::add-mask::${JFROG_TOKEN}"
+
+      # 5. Auth0 (RFC 8693 Custom Token Exchange)
+      - id: auth0_jwt
+        uses: ./.github/actions/get-oidc-jwt
+        with:
+          audience: "https://auth.example.com/ci-exchange"
+      - name: Exchange for Auth0 API Token
+        if: vars.AUTH0_DOMAIN != ''
+        run: |
+          AUTH0_TOKEN=$(curl -fsSL -X POST "https://${{ vars.AUTH0_DOMAIN }}/oauth/token"             -H "Content-Type: application/json"             -d "{
+              "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+              "client_id": "${{ vars.AUTH0_CLIENT_ID }}",
+              "client_secret": "${{ secrets.AUTH0_CLIENT_SECRET }}",
+              "subject_token_type": "urn:ci:oidc:jwt",
+              "subject_token": "${{ steps.auth0_jwt.outputs.jwt }}",
+              "audience": "https://api.internal.example.com"
+            }" | jq -r '.access_token')
+          echo "::add-mask::${AUTH0_TOKEN}"

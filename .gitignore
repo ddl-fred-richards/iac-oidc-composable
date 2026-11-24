@@ -1,0 +1,14 @@
+# Local Terraform / OpenTofu state & caches
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.lock.hcl
+
+# User-specific tfvars (keep *.tfvars.example tracked)
+*.tfvars
+!*.tfvars.example
+
+# Local task artifacts
+.tmp/
+.DS_Store

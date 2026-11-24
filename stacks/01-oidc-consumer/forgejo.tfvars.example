@@ -1,0 +1,12 @@
+git_provider     = "forgejo"
+forgejo_base_url = "https://forgejo.internal.example.com"
+org_name         = "my-org"
+repo_name        = "platform-infra"
+
+# Toggle the consumers you want to deploy
+enable_aws           = true
+enable_entra         = false
+enable_auth0         = false
+enable_jfrog         = false
+enable_zot           = true
+zot_create_configmap = false

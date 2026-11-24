@@ -1,0 +1,50 @@
+name: OpenTofu Split Plan / Apply (OIDC)
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PROFILE: ${{ vars.GIT_PROVIDER_PROFILE || 'github' }}
+  STACK_DIR: stacks/01-oidc-consumer
+
+jobs:
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: aws_jwt
+        uses: ./.github/actions/get-oidc-jwt
+        with:
+          audience: "sts.amazonaws.com"
+      - name: OpenTofu Plan (Read-Only Role)
+        run: |
+          CREDS=$(aws sts assume-role-with-web-identity             --role-arn "${{ vars.AWS_PLAN_ROLE_ARN }}"             --role-session-name "tofu-plan-${GITHUB_RUN_ID}"             --web-identity-token "${{ steps.aws_jwt.outputs.jwt }}"             --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)
+          read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< "$CREDS"
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          tofu -chdir="${STACK_DIR}" init
+          tofu -chdir="${STACK_DIR}" plan -var-file="${PROFILE}.tfvars"
+
+  apply:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod # Gated by EMU-synced GitHub Team reviewers
+    steps:
+      - uses: actions/checkout@v4
+      - id: aws_jwt
+        uses: ./.github/actions/get-oidc-jwt
+        with:
+          audience: "sts.amazonaws.com"
+      - name: OpenTofu Apply (Write Role)
+        run: |
+          CREDS=$(aws sts assume-role-with-web-identity             --role-arn "${{ vars.AWS_APPLY_ROLE_ARN }}"             --role-session-name "tofu-apply-${GITHUB_RUN_ID}"             --web-identity-token "${{ steps.aws_jwt.outputs.jwt }}"             --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)
+          read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< "$CREDS"
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          tofu -chdir="${STACK_DIR}" init
+          tofu -chdir="${STACK_DIR}" apply -auto-approve -var-file="${PROFILE}.tfvars"

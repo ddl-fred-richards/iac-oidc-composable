@@ -1,0 +1,120 @@
+version: '3'
+
+vars:
+  IAC_BIN: '{{.IAC_BIN | default "tofu"}}'
+  STACK: '{{.STACK | default "01-oidc-consumer"}}'
+  PROFILE: '{{.PROFILE | default "github"}}'
+  STACK_DIR: 'stacks/{{.STACK}}'
+  VAR_FILE: '{{.PROFILE}}.tfvars'
+  ZOT_IMAGE: '{{.ZOT_IMAGE | default "ghcr.io/project-zot/zot-linux-amd64:latest"}}'
+  TMP_DIR: '.tmp'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  bootstrap:
+    desc: Copy .tfvars.example files to local .tfvars if missing
+    cmds:
+      - |
+        for stack in 00-foundation-emu 01-oidc-consumer; do
+          for prof in github forgejo; do
+            src="stacks/${stack}/${prof}.tfvars.example"
+            dst="stacks/${stack}/${prof}.tfvars"
+            if [ -f "$src" ] && [ ! -f "$dst" ]; then
+              cp "$src" "$dst"
+              echo "Created $dst"
+            fi
+          done
+        done
+
+  fmt:
+    desc: Format all HCL files recursively
+    cmds:
+      - '{{.IAC_BIN}} fmt -recursive'
+
+  init:
+    desc: Initialize the selected stack (STACK=01-oidc-consumer)
+    dir: '{{.STACK_DIR}}'
+    cmds:
+      - '{{.IAC_BIN}} init'
+
+  validate:
+    desc: Validate HCL syntax and configuration for the selected stack
+    dir: '{{.STACK_DIR}}'
+    cmds:
+      - '{{.IAC_BIN}} validate'
+
+  plan:
+    desc: Run plan for STACK and PROFILE (e.g., task plan PROFILE=forgejo)
+    dir: '{{.STACK_DIR}}'
+    preconditions:
+      - sh: 'test -f "{{.VAR_FILE}}"'
+        msg: 'Missing {{.STACK_DIR}}/{{.VAR_FILE}}. Run "task bootstrap" and edit your values.'
+    cmds:
+      - '{{.IAC_BIN}} plan -var-file="{{.VAR_FILE}}" -out="tfplan-{{.PROFILE}}"'
+
+  apply:
+    desc: Apply the generated plan for STACK and PROFILE
+    dir: '{{.STACK_DIR}}'
+    preconditions:
+      - sh: 'test -f "tfplan-{{.PROFILE}}"'
+        msg: 'No plan file tfplan-{{.PROFILE}} found. Run "task plan PROFILE={{.PROFILE}}" first.'
+    cmds:
+      - '{{.IAC_BIN}} apply "tfplan-{{.PROFILE}}"'
+
+  destroy:
+    desc: Destroy resources for STACK and PROFILE
+    dir: '{{.STACK_DIR}}'
+    preconditions:
+      - sh: 'test -f "{{.VAR_FILE}}"'
+        msg: 'Missing {{.STACK_DIR}}/{{.VAR_FILE}}.'
+    cmds:
+      - '{{.IAC_BIN}} destroy -var-file="{{.VAR_FILE}}"'
+
+  zot:render:
+    desc: Render Zot config.json from stack 01-oidc-consumer outputs into .tmp/zot-config.json
+    cmds:
+      - mkdir -p {{.TMP_DIR}}
+      - '{{.IAC_BIN}} -chdir=stacks/01-oidc-consumer output -raw zot_config_json > {{.TMP_DIR}}/zot-config.json'
+      - 'jq . {{.TMP_DIR}}/zot-config.json > /dev/null'
+      - 'echo "Rendered valid JSON to {{.TMP_DIR}}/zot-config.json"'
+
+  zot:verify:
+    desc: Verify rendered Zot config.json (including CEL expressions) using local zot or container runtime
+    deps: [zot:render]
+    cmds:
+      - |
+        CONFIG_PATH="$(pwd)/{{.TMP_DIR}}/zot-config.json"
+        if command -v zot >/dev/null 2>&1; then
+          echo "Verifying with local zot binary..."
+          zot verify "$CONFIG_PATH"
+        elif command -v podman >/dev/null 2>&1; then
+          echo "Verifying with podman ({{.ZOT_IMAGE}})..."
+          podman run --rm -v "${CONFIG_PATH}:/etc/zot/config.json:ro,Z" {{.ZOT_IMAGE}} verify /etc/zot/config.json
+        elif command -v docker >/dev/null 2>&1; then
+          echo "Verifying with docker ({{.ZOT_IMAGE}})..."
+          docker run --rm -v "${CONFIG_PATH}:/etc/zot/config.json:ro" {{.ZOT_IMAGE}} verify /etc/zot/config.json
+        else
+          echo "ERROR: Neither zot, podman, nor docker found in PATH." >&2
+          exit 1
+        fi
+
+  forgejo:link:
+    desc: Symlink .github/workflows/*.yml into .forgejo/workflows/ for Forgejo Actions parity
+    cmds:
+      - mkdir -p .forgejo/workflows
+      - |
+        for wf in .github/workflows/*.yml; do
+          base="$(basename "$wf")"
+          ln -sf "../../.github/workflows/${base}" ".forgejo/workflows/${base}"
+          echo "Linked .forgejo/workflows/${base} -> ../../.github/workflows/${base}"
+        done
+
+  clean:
+    desc: Remove local .tmp artifacts and saved plan files
+    cmds:
+      - rm -rf {{.TMP_DIR}}
+      - find stacks -name 'tfplan-*' -delete
